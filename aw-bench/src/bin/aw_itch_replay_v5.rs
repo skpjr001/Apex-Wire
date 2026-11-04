@@ -835,7 +835,7 @@ fn print_latency_row(label: &str, samples: &mut Vec<u64>) {
         label, p50 as f64 / GHZ, p99 as f64 / GHZ, p999 as f64 / GHZ, p9999 as f64 / GHZ, max as f64 / GHZ, samples.len());
 }
 
-fn print_header(path: &str, file_size: u64, mode: RunMode, source: IngestSource, sample_mask: u64, symbol_cap: usize, raw: bool) {
+fn print_header(path: &str, file_size: u64, mode: RunMode, source: IngestSource, sample_mask: u64, symbol_cap: usize, raw: bool, brief: bool) {
     println!();
     println!("  +=============================================================================+");
     println!("  |          A P E X - W I R E   V 5   I T C H   R E P L A Y                    |");
@@ -868,6 +868,11 @@ fn print_header(path: &str, file_size: u64, mode: RunMode, source: IngestSource,
         println!("  signal handling     : SIGINT/SIGTERM -> graceful drain + report");
     }
     println!();
+    if brief {
+        println!("  +=============================================================================+");
+        println!();
+        return;
+    }
     println!("  +----------------------------- CORRECTNESS NOTE ------------------------------+");
     println!("  V4's aw_itch_replay used one LimitOrderBook for every symbol in the file. ITCH");
     println!("  order_reference_number values are unique per session, not per symbol, and");
@@ -1025,6 +1030,7 @@ fn main() {
     let has_live_tcp = args.iter().any(|a| a == "--live-tcp");
     let has_live_stdin = args.iter().any(|a| a == "--live-stdin");
     let raw = args.iter().any(|a| a == "--raw");
+    let brief = args.iter().any(|a| a == "--brief");
 
     let mut cap_override: Option<usize> = None;
     let mut skip_indices = std::collections::HashSet::new();
@@ -1038,7 +1044,7 @@ fn main() {
 
     let flags: std::collections::HashSet<&str> = [
         "--legacy-single-lob", "--no-matching", "--live-udp",
-        "--live-tcp", "--live-stdin", "--raw",
+        "--live-tcp", "--live-stdin", "--raw", "--brief",
     ].into_iter().collect();
 
     let positional: Vec<&String> = args[1..].iter().enumerate()
@@ -1113,23 +1119,23 @@ fn main() {
                 Err(e) => { eprintln!("[error] mmap failed: {}", e); std::process::exit(2); }
             }));
             let fs = mapped.len as u64;
-            print_header(&source_arg, fs, mode, source, sample_mask, symbol_cap, raw);
+            print_header(&source_arg, fs, mode, source, sample_mask, symbol_cap, raw, brief);
             (run_ingest_file(mapped.as_slice(), pub_handle), fs)
         }
         IngestSource::LiveUdp => {
-            print_header(&source_arg, 0, mode, source, sample_mask, symbol_cap, raw);
+            print_header(&source_arg, 0, mode, source, sample_mask, symbol_cap, raw, brief);
             let framing = if raw { "raw ITCH" } else { "MoldUDP64" };
             eprintln!("[live] listening on UDP {} [{}] (Ctrl+C to stop)...", source_arg, framing);
             (run_ingest_udp(&source_arg, live_iface.as_deref(), raw, pub_handle), 0)
         }
         IngestSource::LiveTcp => {
-            print_header(&source_arg, 0, mode, source, sample_mask, symbol_cap, raw);
+            print_header(&source_arg, 0, mode, source, sample_mask, symbol_cap, raw, brief);
             let framing = if raw { "raw ITCH" } else { "SoupBinTCP" };
             eprintln!("[live] connecting to TCP {} [{}]...", source_arg, framing);
             (run_ingest_tcp(&source_arg, raw, pub_handle), 0)
         }
         IngestSource::LiveStdin => {
-            print_header("stdin", 0, mode, source, sample_mask, symbol_cap, raw);
+            print_header("stdin", 0, mode, source, sample_mask, symbol_cap, raw, brief);
             eprintln!("[live] reading ITCH from stdin (Ctrl+C or EOF to stop)...");
             (run_ingest_stdin(pub_handle), 0)
         }
