@@ -305,3 +305,78 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod tests_v5 {
+    use super::*;
+
+    #[repr(C, align(64))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Ev {
+        val: u64,
+        _pad: [u8; 56],
+    }
+    impl Default for Ev {
+        fn default() -> Self {
+            Self { val: 0, _pad: [0; 56] }
+        }
+    }
+
+    #[test]
+    fn wrap_around_three_rounds() {
+        let d = Disruptor::<Ev>::new(4).unwrap();
+        let p = d.publisher();
+        let mut c = d.consumer();
+        for round in 0..3u64 {
+            for i in 0..4u64 {
+                let seq = p.claim_spin();
+                p.get_mut(seq).val = round * 4 + i;
+                p.publish(seq);
+            }
+            let mut expected = round * 4;
+            let n = c.drain(4, |ev| {
+                assert_eq!(ev.val, expected);
+                expected += 1;
+            });
+            assert_eq!(n, 4);
+        }
+    }
+
+    #[test]
+    fn drain_partial_then_remainder() {
+        let d = Disruptor::<Ev>::new(8).unwrap();
+        let p = d.publisher();
+        let mut c = d.consumer();
+        for i in 0..6u64 {
+            let seq = p.claim_spin();
+            p.get_mut(seq).val = i;
+            p.publish(seq);
+        }
+        let n = c.drain(3, |ev| {
+            assert!(ev.val < 3);
+        });
+        assert_eq!(n, 3);
+        let n2 = c.drain(10, |ev| {
+            assert!(ev.val >= 3 && ev.val < 6);
+        });
+        assert_eq!(n2, 3);
+    }
+
+    #[test]
+    fn drain_returns_zero_when_caught_up() {
+        let d = Disruptor::<Ev>::new(4).unwrap();
+        let p = d.publisher();
+        let mut c = d.consumer();
+        let seq = p.claim_spin();
+        p.get_mut(seq).val = 42;
+        p.publish(seq);
+        let n = c.drain(10, |ev| {
+            assert_eq!(ev.val, 42);
+        });
+        assert_eq!(n, 1);
+        let n2 = c.drain(10, |_| {
+            panic!("should not be called");
+        });
+        assert_eq!(n2, 0);
+    }
+}

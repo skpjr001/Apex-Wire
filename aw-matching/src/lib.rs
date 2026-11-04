@@ -452,3 +452,112 @@ mod tests {
     }
 }
 
+
+impl MatchingEngine {
+    pub fn clear(&mut self, new_symbol: [u8; 8]) {
+        self.symbol = new_symbol;
+        self.free_head = 0;
+        self.best_bid = 0;
+        self.min_bid = 0;
+        self.best_ask = u32::MAX;
+        self.max_ask = 0;
+        self.match_number = 0;
+        let orders = self.data.orders.as_mut_ptr();
+        for i in 0..MAX_ORDERS {
+            // SAFETY: i is within the allocated orders bounds.
+            unsafe {
+                (*orders.add(i)).next = if i + 1 < MAX_ORDERS { (i + 1) as u32 } else { NULL_IDX };
+                (*orders.add(i)).generation = 0;
+                (*orders.add(i)).active = false;
+            }
+        }
+        let bids = self.data.bid_levels.as_mut_ptr();
+        let asks = self.data.ask_levels.as_mut_ptr();
+        for i in 0..PRICE_SLOTS {
+            // SAFETY: i is within the allocated level bounds.
+            unsafe {
+                (*bids.add(i)).head = NULL_IDX;
+                (*bids.add(i)).tail = NULL_IDX;
+                (*bids.add(i)).total_shares = 0;
+                (*bids.add(i)).order_count = 0;
+                (*bids.add(i)).active = false;
+                (*asks.add(i)).head = NULL_IDX;
+                (*asks.add(i)).tail = NULL_IDX;
+                (*asks.add(i)).total_shares = 0;
+                (*asks.add(i)).order_count = 0;
+                (*asks.add(i)).active = false;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_v5 {
+    use super::*;
+
+    #[test]
+    fn full_fill_removes_order_and_clears_level() {
+        let mut e = MatchingEngine::new(*b"FULL    ");
+        let r1 = e.match_order(100, 500, Side::Sell, 1);
+        let oid = r1.resting_order_id;
+        assert!(e.order_active(oid));
+        let r2 = e.match_order(100, 500, Side::Buy, 2);
+        assert_eq!(r2.fill_count, 1);
+        assert_eq!(r2.fill.shares, 500);
+        assert!(!e.order_active(oid));
+        let bbo = e.bbo();
+        assert_eq!(bbo.ask_price, 0);
+        assert_eq!(bbo.bid_price, 0);
+    }
+
+    #[test]
+    fn multi_level_bbo_advance_on_empty() {
+        let mut e = MatchingEngine::new(*b"ADV     ");
+        e.match_order(100, 100, Side::Sell, 1);
+        e.match_order(101, 100, Side::Sell, 2);
+        e.match_order(102, 100, Side::Sell, 3);
+        assert_eq!(e.bbo().ask_price, 100);
+        e.match_order(100, 100, Side::Buy, 4);
+        assert_eq!(e.bbo().ask_price, 101);
+        e.match_order(101, 100, Side::Buy, 5);
+        assert_eq!(e.bbo().ask_price, 102);
+        e.match_order(102, 100, Side::Buy, 6);
+        assert_eq!(e.bbo().ask_price, 0);
+    }
+
+    #[test]
+    fn generation_increments_on_slot_reuse() {
+        let mut e = MatchingEngine::new(*b"GEN     ");
+        let r1 = e.match_order(100, 100, Side::Buy, 1);
+        let oid = r1.resting_order_id;
+        let gen1 = r1.resting_generation;
+        assert!(e.cancel_order(oid, gen1));
+        let r2 = e.match_order(200, 100, Side::Buy, 2);
+        assert_eq!(r2.resting_order_id, oid);
+        let gen2 = r2.resting_generation;
+        assert_ne!(gen1, gen2);
+        assert!(!e.cancel_order(oid, gen1));
+        assert!(e.cancel_order(oid, gen2));
+    }
+
+    #[test]
+    fn clear_resets_all_state() {
+        let mut e = MatchingEngine::new(*b"BEFORE  ");
+        e.match_order(100, 100, Side::Buy, 1);
+        e.match_order(200, 100, Side::Sell, 2);
+        e.clear(*b"AFTER   ");
+        let bbo = e.bbo();
+        assert_eq!(bbo.bid_price, 0);
+        assert_eq!(bbo.ask_price, 0);
+        let r = e.match_order(300, 50, Side::Buy, 3);
+        assert_eq!(r.fill_count, 0);
+        assert_ne!(r.resting_order_id, NULL_IDX);
+    }
+
+    #[test]
+    fn cancel_rejects_out_of_bounds() {
+        let mut e = MatchingEngine::new(*b"BOUNDS  ");
+        assert!(!e.cancel_order(MAX_ORDERS as u32, 0));
+        assert!(!e.cancel_order(u32::MAX, 0));
+    }
+}

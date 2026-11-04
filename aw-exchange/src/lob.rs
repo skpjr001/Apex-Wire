@@ -574,3 +574,136 @@ impl LimitOrderBook {
         }
     }
 }
+
+impl LimitOrderBook {
+    pub fn clear(&mut self, new_symbol: [u8; 8]) {
+        self.symbol = new_symbol;
+        self.best_bid_price = 0;
+        self.best_bid_shares = 0;
+        self.best_ask_price = u32::MAX;
+        self.best_ask_shares = 0;
+        self.bid_bitmap.fill(0);
+        self.ask_bitmap.fill(0);
+    }
+}
+
+#[cfg(test)]
+mod tests_v5 {
+    use super::*;
+
+    fn add(order_id: u64, price: u32, shares: u32, side: Side) -> MarketEvent {
+        let mut e = MarketEvent::default();
+        e.kind = EventKind::AddOrder;
+        e.order_id = order_id;
+        e.price = price;
+        e.shares = shares;
+        e.side = side;
+        e
+    }
+
+    fn del(order_id: u64) -> MarketEvent {
+        let mut e = MarketEvent::default();
+        e.kind = EventKind::OrderDelete;
+        e.order_id = order_id;
+        e
+    }
+
+    fn cancel(order_id: u64, shares: u32) -> MarketEvent {
+        let mut e = MarketEvent::default();
+        e.kind = EventKind::OrderCancel;
+        e.order_id = order_id;
+        e.shares = shares;
+        e
+    }
+
+    fn replace(order_id: u64, new_order_id: u64, price: u32, shares: u32) -> MarketEvent {
+        let mut e = MarketEvent::default();
+        e.kind = EventKind::OrderReplace;
+        e.order_id = order_id;
+        e.new_order_id = new_order_id;
+        e.price = price;
+        e.shares = shares;
+        e
+    }
+
+    #[test]
+    fn clear_then_reuse_produces_clean_bbo() {
+        let mut lob = LimitOrderBook::new(*b"OLD     ");
+        lob.apply_event(&add(1, 100, 500, Side::Buy));
+        lob.apply_event(&add(2, 200, 300, Side::Sell));
+        assert_eq!(lob.best_bid_price, 100);
+        lob.clear(*b"NEW     ");
+        assert_eq!(lob.best_bid_price, 0);
+        assert_eq!(lob.best_ask_price, u32::MAX);
+        assert_eq!(lob.symbol, *b"NEW     ");
+        lob.apply_event(&add(3, 150, 100, Side::Buy));
+        let bbo = lob.bbo();
+        assert_eq!(bbo.bid_price, 150);
+        assert_eq!(bbo.bid_shares, 100);
+        assert_eq!(bbo.ask_price, 0);
+    }
+
+    #[test]
+    fn replace_removes_old_adds_new_updates_bbo() {
+        let mut lob = LimitOrderBook::new(*b"REPL    ");
+        lob.apply_event(&add(10, 100, 200, Side::Buy));
+        lob.apply_event(&add(20, 110, 300, Side::Buy));
+        assert_eq!(lob.best_bid_price, 110);
+        lob.apply_event(&replace(20, 21, 90, 500, ));
+        assert_eq!(lob.best_bid_price, 100);
+        assert_eq!(lob.shares_at_price(90, Side::Buy), 500);
+        assert_eq!(lob.shares_at_price(110, Side::Buy), 0);
+        assert!(lob.order_info(20).is_none());
+        let info = lob.order_info(21).unwrap();
+        assert_eq!(info.0, 90);
+        assert_eq!(info.1, 500);
+    }
+
+    #[test]
+    fn cancel_decrements_level_and_deactivates_slot() {
+        let mut lob = LimitOrderBook::new(*b"PART    ");
+        lob.apply_event(&add(5, 100, 1000, Side::Sell));
+        lob.apply_event(&add(6, 100, 500, Side::Sell));
+        assert_eq!(lob.shares_at_price(100, Side::Sell), 1500);
+        lob.apply_event(&cancel(5, 400));
+        assert_eq!(lob.shares_at_price(100, Side::Sell), 1100);
+        assert!(lob.order_info(5).is_none());
+        assert!(lob.order_info(6).is_some());
+    }
+
+    #[test]
+    fn noop_events_do_not_mutate() {
+        let mut lob = LimitOrderBook::new(*b"NOOP    ");
+        lob.apply_event(&add(1, 100, 100, Side::Buy));
+        let mut trade = MarketEvent::default();
+        trade.kind = EventKind::Trade;
+        trade.order_id = 1;
+        trade.shares = 50;
+        lob.apply_event(&trade);
+        assert_eq!(lob.best_bid_price, 100);
+        assert_eq!(lob.best_bid_shares, 100);
+        assert!(lob.order_info(1).is_some());
+    }
+
+    #[test]
+    fn delete_inactive_order_is_noop() {
+        let mut lob = LimitOrderBook::new(*b"INACT   ");
+        lob.apply_event(&add(1, 100, 100, Side::Buy));
+        lob.apply_event(&del(1));
+        lob.apply_event(&del(1));
+        assert_eq!(lob.best_bid_price, 0);
+    }
+
+    #[test]
+    fn clear_preserves_stale_order_map_safely() {
+        let mut lob = LimitOrderBook::new(*b"STALE   ");
+        lob.apply_event(&add(42, 100, 500, Side::Buy));
+        lob.clear(*b"FRESH   ");
+        assert!(lob.order_info(42).is_some());
+        lob.apply_event(&add(42, 200, 100, Side::Sell));
+        let info = lob.order_info(42).unwrap();
+        assert_eq!(info.0, 200);
+        assert_eq!(info.1, 100);
+        assert_eq!(info.2, Side::Sell);
+    }
+}
